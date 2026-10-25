@@ -126,4 +126,39 @@ class IncidentRepositoryTest {
                 10L, List.of("ONGOING", "ACKNOWLEDGED")
         );
     }
+
+    @Test
+    void findByMonitorUserIdAndStatusOrderByStartedAtDesc_filtersByUserAndStatus() {
+        when(incidentRepository.findByMonitorUserIdAndStatusOrderByStartedAtDesc(1L, "ONGOING"))
+                .thenReturn(List.of(activeIncident));
+
+        List<Incident> incidents = incidentRepository.findByMonitorUserIdAndStatusOrderByStartedAtDesc(1L, "ONGOING");
+
+        assertEquals(1, incidents.size());
+        assertEquals("ONGOING", incidents.get(0).getStatus());
+        verify(incidentRepository).findByMonitorUserIdAndStatusOrderByStartedAtDesc(1L, "ONGOING");
+    }
+
+    @Test
+    void findByIdAndMonitorUserId_whenOwned_returnsIncident() {
+        when(incidentRepository.findByIdAndMonitorUserId(101L, 1L))
+                .thenReturn(Optional.of(activeIncident));
+
+        Optional<Incident> result = incidentRepository.findByIdAndMonitorUserId(101L, 1L);
+
+        assertTrue(result.isPresent());
+        assertEquals(101L, result.get().getId());
+        verify(incidentRepository).findByIdAndMonitorUserId(101L, 1L);
+    }
+
+    @Test
+    void findByIdAndMonitorUserId_whenNotOwned_returnsEmpty() {
+        when(incidentRepository.findByIdAndMonitorUserId(101L, 2L))
+                .thenReturn(Optional.empty());
+
+        Optional<Incident> result = incidentRepository.findByIdAndMonitorUserId(101L, 2L);
+
+        assertFalse(result.isPresent());
+        verify(incidentRepository).findByIdAndMonitorUserId(101L, 2L);
+    }
 }

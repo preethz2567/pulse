@@ -26,5 +26,9 @@ public interface IncidentRepository extends JpaRepository<Incident, Long> {
 
     List<Incident> findByMonitorUserIdOrderByStartedAtDesc(Long userId);
 
+    List<Incident> findByMonitorUserIdAndStatusOrderByStartedAtDesc(Long userId, String status);
+
+    Optional<Incident> findByIdAndMonitorUserId(Long id, Long userId);
+
     List<Incident> findByStatusInOrderByStartedAtDesc(Collection<String> statuses);
 }
