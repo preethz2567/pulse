@@ -70,6 +70,20 @@ public class GlobalExceptionHandler {
         return ResponseEntity.status(HttpStatus.NOT_FOUND).body(errorResponse);
     }
 
+    @ExceptionHandler(AlertChannelNotFoundException.class)
+    public ResponseEntity<ErrorResponse> handleAlertChannelNotFound(
+            AlertChannelNotFoundException ex,
+            HttpServletRequest request
+    ) {
+        ErrorResponse errorResponse = new ErrorResponse(
+                HttpStatus.NOT_FOUND.value(),
+                HttpStatus.NOT_FOUND.getReasonPhrase(),
+                ex.getMessage(),
+                request.getRequestURI()
+        );
+        return ResponseEntity.status(HttpStatus.NOT_FOUND).body(errorResponse);
+    }
+
     @ExceptionHandler(SsrfProtectionException.class)
     public ResponseEntity<ErrorResponse> handleSsrfProtection(
             SsrfProtectionException ex,
