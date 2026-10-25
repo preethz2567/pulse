@@ -18,6 +18,8 @@ public interface AlertChannelRepository extends JpaRepository<AlertChannel, Long
 
     List<AlertChannel> findByMonitorIdAndIsEnabledTrue(Long monitorId);
 
+    List<AlertChannel> findByMonitorIdAndTypeIgnoreCaseAndIsEnabledTrue(Long monitorId, String type);
+
     List<AlertChannel> findByMonitorIdAndUserId(Long monitorId, Long userId);
 
     List<AlertChannel> findByMonitorIdAndUserIdOrderByCreatedAtDesc(Long monitorId, Long userId);

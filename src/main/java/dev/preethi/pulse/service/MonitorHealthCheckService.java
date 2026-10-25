@@ -30,6 +30,7 @@ public class MonitorHealthCheckService {
     private final MonitorRepository monitorRepository;
     private final CheckResultRepository checkResultRepository;
     private final IncidentRepository incidentRepository;
+    private final EmailAlertService emailAlertService;
     private final SsrfProtectionService ssrfProtectionService;
     private final HttpClient httpClient;
 
@@ -37,12 +38,14 @@ public class MonitorHealthCheckService {
             MonitorRepository monitorRepository,
             CheckResultRepository checkResultRepository,
             IncidentRepository incidentRepository,
+            EmailAlertService emailAlertService,
             SsrfProtectionService ssrfProtectionService,
             HttpClient httpClient
     ) {
         this.monitorRepository = monitorRepository;
         this.checkResultRepository = checkResultRepository;
         this.incidentRepository = incidentRepository;
+        this.emailAlertService = emailAlertService;
         this.ssrfProtectionService = ssrfProtectionService;
         this.httpClient = httpClient;
     }
@@ -155,6 +158,11 @@ public class MonitorHealthCheckService {
                 activeIncident.resolve(checkTime);
                 incidentRepository.save(activeIncident);
                 log.info("Resolved active incident {} for monitor ID {}", activeIncident.getId(), monitor.getId());
+                try {
+                    emailAlertService.sendIncidentResolvedAlert(activeIncident);
+                } catch (Exception e) {
+                    log.error("Error triggering incident resolved alert for monitor ID {}: {}", monitor.getId(), e.getMessage());
+                }
             });
         } else {
             Optional<Incident> activeIncidentOpt = incidentRepository.findActiveIncidentByMonitorId(monitor.getId());
@@ -163,6 +171,11 @@ public class MonitorHealthCheckService {
                 Incident incident = new Incident(monitor, Incident.STATUS_ONGOING, cause, checkTime);
                 incidentRepository.save(incident);
                 log.info("Created new incident for monitor ID {} due to: {}", monitor.getId(), cause);
+                try {
+                    emailAlertService.sendIncidentOpenedAlert(incident);
+                } catch (Exception e) {
+                    log.error("Error triggering incident opened alert for monitor ID {}: {}", monitor.getId(), e.getMessage());
+                }
             }
         }
     }

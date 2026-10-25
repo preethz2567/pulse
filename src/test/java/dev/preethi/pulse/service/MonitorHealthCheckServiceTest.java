@@ -51,6 +51,9 @@ class MonitorHealthCheckServiceTest {
     private IncidentRepository incidentRepository;
 
     @Mock
+    private EmailAlertService emailAlertService;
+
+    @Mock
     private SsrfProtectionService ssrfProtectionService;
 
     @Mock
@@ -265,6 +268,8 @@ class MonitorHealthCheckServiceTest {
         assertNotNull(created.getStartedAt());
         assertNull(created.getResolvedAt());
         assertTrue(created.getCause().contains("Expected status 200 but received 500"));
+
+        verify(emailAlertService).sendIncidentOpenedAlert(created);
     }
 
     @Test
@@ -287,8 +292,9 @@ class MonitorHealthCheckServiceTest {
         assertFalse(result.getIsSuccess());
         assertEquals("DOWN", monitor.getStatus());
 
-        // Should NOT create or save any incident
+        // Should NOT create or save any incident, and should NOT send email
         verify(incidentRepository, never()).save(any(Incident.class));
+        verify(emailAlertService, never()).sendIncidentOpenedAlert(any());
     }
 
     @Test
@@ -316,6 +322,8 @@ class MonitorHealthCheckServiceTest {
         assertEquals(Incident.STATUS_RESOLVED, activeIncident.getStatus());
         assertNotNull(activeIncident.getResolvedAt());
         assertTrue(activeIncident.getResolvedAt().isAfter(incidentStartTime));
+
+        verify(emailAlertService).sendIncidentResolvedAlert(activeIncident);
     }
 
     @Test
@@ -344,6 +352,8 @@ class MonitorHealthCheckServiceTest {
         assertEquals(Incident.STATUS_RESOLVED, acknowledgedIncident.getStatus());
         assertNotNull(acknowledgedIncident.getResolvedAt());
         assertNotNull(acknowledgedIncident.getAcknowledgedAt());
+
+        verify(emailAlertService).sendIncidentResolvedAlert(acknowledgedIncident);
     }
 
     @Test
@@ -365,6 +375,7 @@ class MonitorHealthCheckServiceTest {
         assertEquals("UP", monitor.getStatus());
 
         verify(incidentRepository, never()).save(any(Incident.class));
+        verify(emailAlertService, never()).sendIncidentResolvedAlert(any());
     }
 
     @Test
@@ -438,5 +449,33 @@ class MonitorHealthCheckServiceTest {
         assertEquals(monitor, incident.getMonitor());
         assertNotNull(incident.getStartedAt());
         assertTrue(incident.getCause().contains("Connection error: Connection refused: connect"));
+    }
+
+    @Test
+    void performCheck_whenEmailAlertServiceThrowsException_checkResultAndIncidentStillPersistSuccessfully() throws Exception {
+        doNothing().when(ssrfProtectionService).validateUrl(monitor.getUrl());
+
+        @SuppressWarnings("unchecked")
+        HttpResponse<Void> mockResponse = mock(HttpResponse.class);
+        when(mockResponse.statusCode()).thenReturn(503);
+        doReturn(mockResponse).when(httpClient).send(any(HttpRequest.class), any());
+
+        when(checkResultRepository.save(any())).thenAnswer(i -> i.getArgument(0));
+        when(incidentRepository.findActiveIncidentByMonitorId(10L)).thenReturn(Optional.empty());
+
+        doThrow(new RuntimeException("Mailpit connection failed"))
+                .when(emailAlertService).sendIncidentOpenedAlert(any());
+
+        CheckResult result = healthCheckService.performCheck(monitor);
+
+        assertNotNull(result);
+        assertFalse(result.getIsSuccess());
+        assertEquals(503, result.getStatusCode());
+        assertEquals("DOWN", monitor.getStatus());
+
+        verify(monitorRepository).save(monitor);
+        verify(checkResultRepository).save(any(CheckResult.class));
+        verify(incidentRepository).save(any(Incident.class));
+        verify(emailAlertService).sendIncidentOpenedAlert(any());
     }
 }

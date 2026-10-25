@@ -96,4 +96,16 @@ class AlertChannelRepositoryTest {
         assertEquals(2, result.size());
         verify(alertChannelRepository).findByMonitorIdAndUserIdOrderByCreatedAtDesc(10L, 1L);
     }
+
+    @Test
+    void findByMonitorIdAndTypeIgnoreCaseAndIsEnabledTrue_returnsMatchingChannels() {
+        when(alertChannelRepository.findByMonitorIdAndTypeIgnoreCaseAndIsEnabledTrue(10L, "EMAIL"))
+                .thenReturn(List.of(emailChannel));
+
+        List<AlertChannel> result = alertChannelRepository.findByMonitorIdAndTypeIgnoreCaseAndIsEnabledTrue(10L, "EMAIL");
+
+        assertEquals(1, result.size());
+        assertEquals("EMAIL", result.get(0).getType());
+        verify(alertChannelRepository).findByMonitorIdAndTypeIgnoreCaseAndIsEnabledTrue(10L, "EMAIL");
+    }
 }
