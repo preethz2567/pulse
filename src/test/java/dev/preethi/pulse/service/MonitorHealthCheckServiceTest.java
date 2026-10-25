@@ -1,10 +1,12 @@
 package dev.preethi.pulse.service;
 
 import dev.preethi.pulse.entity.CheckResult;
+import dev.preethi.pulse.entity.Incident;
 import dev.preethi.pulse.entity.Monitor;
 import dev.preethi.pulse.entity.User;
 import dev.preethi.pulse.exception.SsrfProtectionException;
 import dev.preethi.pulse.repository.CheckResultRepository;
+import dev.preethi.pulse.repository.IncidentRepository;
 import dev.preethi.pulse.repository.MonitorRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -44,6 +46,9 @@ class MonitorHealthCheckServiceTest {
 
     @Mock
     private CheckResultRepository checkResultRepository;
+
+    @Mock
+    private IncidentRepository incidentRepository;
 
     @Mock
     private SsrfProtectionService ssrfProtectionService;
@@ -96,6 +101,7 @@ class MonitorHealthCheckServiceTest {
 
         verify(monitorRepository).save(monitor);
         verify(checkResultRepository).save(any(CheckResult.class));
+        verify(incidentRepository, never()).save(any(Incident.class));
     }
 
     @Test
@@ -121,6 +127,7 @@ class MonitorHealthCheckServiceTest {
 
         verify(monitorRepository).save(monitor);
         verify(checkResultRepository).save(any(CheckResult.class));
+        verify(incidentRepository).save(any(Incident.class));
     }
 
     @Test
@@ -144,6 +151,7 @@ class MonitorHealthCheckServiceTest {
 
         verify(monitorRepository).save(monitor);
         verify(checkResultRepository).save(any(CheckResult.class));
+        verify(incidentRepository).save(any(Incident.class));
     }
 
     @Test
@@ -167,6 +175,7 @@ class MonitorHealthCheckServiceTest {
 
         verify(monitorRepository).save(monitor);
         verify(checkResultRepository).save(any(CheckResult.class));
+        verify(incidentRepository).save(any(Incident.class));
     }
 
     @Test
@@ -189,6 +198,7 @@ class MonitorHealthCheckServiceTest {
         verify(httpClient, never()).send(any(), any());
         verify(monitorRepository).save(monitor);
         verify(checkResultRepository).save(any(CheckResult.class));
+        verify(incidentRepository).save(any(Incident.class));
     }
 
     @Test
@@ -211,6 +221,7 @@ class MonitorHealthCheckServiceTest {
         ArgumentCaptor<Monitor> captor = ArgumentCaptor.forClass(Monitor.class);
         verify(monitorRepository).save(captor.capture());
         assertEquals(monitor.getLastCheckedAt(), captor.getValue().getLastCheckedAt());
+        verify(incidentRepository, never()).save(any(Incident.class));
     }
 
     @Test
@@ -224,5 +235,208 @@ class MonitorHealthCheckServiceTest {
         verify(httpClient, never()).send(any(), any());
         verify(ssrfProtectionService, never()).validateUrl(any());
         verify(checkResultRepository, never()).save(any());
+        verify(incidentRepository, never()).save(any());
+    }
+
+    @Test
+    void performCheck_downWithNoActiveIncident_createsOneOngoingIncident() throws Exception {
+        doNothing().when(ssrfProtectionService).validateUrl(monitor.getUrl());
+
+        @SuppressWarnings("unchecked")
+        HttpResponse<Void> mockResponse = mock(HttpResponse.class);
+        when(mockResponse.statusCode()).thenReturn(500);
+        doReturn(mockResponse).when(httpClient).send(any(HttpRequest.class), any());
+
+        when(checkResultRepository.save(any())).thenAnswer(i -> i.getArgument(0));
+        when(incidentRepository.findActiveIncidentByMonitorId(10L)).thenReturn(Optional.empty());
+
+        CheckResult result = healthCheckService.performCheck(monitor);
+
+        assertNotNull(result);
+        assertFalse(result.getIsSuccess());
+        assertEquals("DOWN", monitor.getStatus());
+
+        ArgumentCaptor<Incident> incidentCaptor = ArgumentCaptor.forClass(Incident.class);
+        verify(incidentRepository).save(incidentCaptor.capture());
+
+        Incident created = incidentCaptor.getValue();
+        assertEquals(Incident.STATUS_ONGOING, created.getStatus());
+        assertEquals(monitor, created.getMonitor());
+        assertNotNull(created.getStartedAt());
+        assertNull(created.getResolvedAt());
+        assertTrue(created.getCause().contains("Expected status 200 but received 500"));
+    }
+
+    @Test
+    void performCheck_downWithExistingActiveIncident_doesNotCreateAnotherIncident() throws Exception {
+        doNothing().when(ssrfProtectionService).validateUrl(monitor.getUrl());
+
+        @SuppressWarnings("unchecked")
+        HttpResponse<Void> mockResponse = mock(HttpResponse.class);
+        when(mockResponse.statusCode()).thenReturn(500);
+        doReturn(mockResponse).when(httpClient).send(any(HttpRequest.class), any());
+
+        when(checkResultRepository.save(any())).thenAnswer(i -> i.getArgument(0));
+
+        Incident existingIncident = new Incident(monitor, Incident.STATUS_ONGOING, "Previous 500 error", Instant.now().minusSeconds(120));
+        when(incidentRepository.findActiveIncidentByMonitorId(10L)).thenReturn(Optional.of(existingIncident));
+
+        CheckResult result = healthCheckService.performCheck(monitor);
+
+        assertNotNull(result);
+        assertFalse(result.getIsSuccess());
+        assertEquals("DOWN", monitor.getStatus());
+
+        // Should NOT create or save any incident
+        verify(incidentRepository, never()).save(any(Incident.class));
+    }
+
+    @Test
+    void performCheck_upWithActiveOngoingIncident_resolvesIt() throws Exception {
+        doNothing().when(ssrfProtectionService).validateUrl(monitor.getUrl());
+
+        @SuppressWarnings("unchecked")
+        HttpResponse<Void> mockResponse = mock(HttpResponse.class);
+        when(mockResponse.statusCode()).thenReturn(200);
+        doReturn(mockResponse).when(httpClient).send(any(HttpRequest.class), any());
+
+        when(checkResultRepository.save(any())).thenAnswer(i -> i.getArgument(0));
+
+        Instant incidentStartTime = Instant.now().minusSeconds(300);
+        Incident activeIncident = new Incident(monitor, Incident.STATUS_ONGOING, "Prior timeout", incidentStartTime);
+        when(incidentRepository.findActiveIncidentByMonitorId(10L)).thenReturn(Optional.of(activeIncident));
+
+        CheckResult result = healthCheckService.performCheck(monitor);
+
+        assertNotNull(result);
+        assertTrue(result.getIsSuccess());
+        assertEquals("UP", monitor.getStatus());
+
+        verify(incidentRepository).save(activeIncident);
+        assertEquals(Incident.STATUS_RESOLVED, activeIncident.getStatus());
+        assertNotNull(activeIncident.getResolvedAt());
+        assertTrue(activeIncident.getResolvedAt().isAfter(incidentStartTime));
+    }
+
+    @Test
+    void performCheck_upWithActiveAcknowledgedIncident_resolvesIt() throws Exception {
+        doNothing().when(ssrfProtectionService).validateUrl(monitor.getUrl());
+
+        @SuppressWarnings("unchecked")
+        HttpResponse<Void> mockResponse = mock(HttpResponse.class);
+        when(mockResponse.statusCode()).thenReturn(200);
+        doReturn(mockResponse).when(httpClient).send(any(HttpRequest.class), any());
+
+        when(checkResultRepository.save(any())).thenAnswer(i -> i.getArgument(0));
+
+        Instant incidentStartTime = Instant.now().minusSeconds(600);
+        Incident acknowledgedIncident = new Incident(monitor, Incident.STATUS_ACKNOWLEDGED, "Service unavailable", incidentStartTime);
+        acknowledgedIncident.setAcknowledgedAt(Instant.now().minusSeconds(300));
+        when(incidentRepository.findActiveIncidentByMonitorId(10L)).thenReturn(Optional.of(acknowledgedIncident));
+
+        CheckResult result = healthCheckService.performCheck(monitor);
+
+        assertNotNull(result);
+        assertTrue(result.getIsSuccess());
+        assertEquals("UP", monitor.getStatus());
+
+        verify(incidentRepository).save(acknowledgedIncident);
+        assertEquals(Incident.STATUS_RESOLVED, acknowledgedIncident.getStatus());
+        assertNotNull(acknowledgedIncident.getResolvedAt());
+        assertNotNull(acknowledgedIncident.getAcknowledgedAt());
+    }
+
+    @Test
+    void performCheck_upWithNoActiveIncident_doesNotCreateOrSaveIncident() throws Exception {
+        doNothing().when(ssrfProtectionService).validateUrl(monitor.getUrl());
+
+        @SuppressWarnings("unchecked")
+        HttpResponse<Void> mockResponse = mock(HttpResponse.class);
+        when(mockResponse.statusCode()).thenReturn(200);
+        doReturn(mockResponse).when(httpClient).send(any(HttpRequest.class), any());
+
+        when(checkResultRepository.save(any())).thenAnswer(i -> i.getArgument(0));
+        when(incidentRepository.findActiveIncidentByMonitorId(10L)).thenReturn(Optional.empty());
+
+        CheckResult result = healthCheckService.performCheck(monitor);
+
+        assertNotNull(result);
+        assertTrue(result.getIsSuccess());
+        assertEquals("UP", monitor.getStatus());
+
+        verify(incidentRepository, never()).save(any(Incident.class));
+    }
+
+    @Test
+    void performCheck_ssrfFailure_createsDownResultAndIncidentWithCause() throws Exception {
+        doThrow(new SsrfProtectionException("Access to loopback address is prohibited: 127.0.0.1"))
+                .when(ssrfProtectionService).validateUrl(monitor.getUrl());
+
+        when(checkResultRepository.save(any())).thenAnswer(i -> i.getArgument(0));
+        when(incidentRepository.findActiveIncidentByMonitorId(10L)).thenReturn(Optional.empty());
+
+        CheckResult result = healthCheckService.performCheck(monitor);
+
+        assertNotNull(result);
+        assertFalse(result.getIsSuccess());
+        assertEquals("DOWN", monitor.getStatus());
+
+        ArgumentCaptor<Incident> captor = ArgumentCaptor.forClass(Incident.class);
+        verify(incidentRepository).save(captor.capture());
+        Incident incident = captor.getValue();
+        assertEquals(Incident.STATUS_ONGOING, incident.getStatus());
+        assertEquals(monitor, incident.getMonitor());
+        assertNotNull(incident.getStartedAt());
+        assertTrue(incident.getCause().contains("SSRF Protection: Access to loopback address is prohibited: 127.0.0.1"));
+    }
+
+    @Test
+    void performCheck_timeoutFailure_createsDownResultAndIncidentWithCause() throws Exception {
+        doNothing().when(ssrfProtectionService).validateUrl(monitor.getUrl());
+
+        when(httpClient.send(any(HttpRequest.class), any()))
+                .thenThrow(new HttpTimeoutException("Connection timed out after 10000ms"));
+
+        when(checkResultRepository.save(any())).thenAnswer(i -> i.getArgument(0));
+        when(incidentRepository.findActiveIncidentByMonitorId(10L)).thenReturn(Optional.empty());
+
+        CheckResult result = healthCheckService.performCheck(monitor);
+
+        assertNotNull(result);
+        assertFalse(result.getIsSuccess());
+        assertEquals("DOWN", monitor.getStatus());
+
+        ArgumentCaptor<Incident> captor = ArgumentCaptor.forClass(Incident.class);
+        verify(incidentRepository).save(captor.capture());
+        Incident incident = captor.getValue();
+        assertEquals(Incident.STATUS_ONGOING, incident.getStatus());
+        assertEquals(monitor, incident.getMonitor());
+        assertNotNull(incident.getStartedAt());
+        assertTrue(incident.getCause().contains("Request timed out: Connection timed out after 10000ms"));
+    }
+
+    @Test
+    void performCheck_connectionFailure_createsDownResultAndIncidentWithCause() throws Exception {
+        doNothing().when(ssrfProtectionService).validateUrl(monitor.getUrl());
+
+        when(httpClient.send(any(HttpRequest.class), any()))
+                .thenThrow(new IOException("Connection refused: connect"));
+
+        when(checkResultRepository.save(any())).thenAnswer(i -> i.getArgument(0));
+        when(incidentRepository.findActiveIncidentByMonitorId(10L)).thenReturn(Optional.empty());
+
+        CheckResult result = healthCheckService.performCheck(monitor);
+
+        assertNotNull(result);
+        assertFalse(result.getIsSuccess());
+        assertEquals("DOWN", monitor.getStatus());
+
+        ArgumentCaptor<Incident> captor = ArgumentCaptor.forClass(Incident.class);
+        verify(incidentRepository).save(captor.capture());
+        Incident incident = captor.getValue();
+        assertEquals(Incident.STATUS_ONGOING, incident.getStatus());
+        assertEquals(monitor, incident.getMonitor());
+        assertNotNull(incident.getStartedAt());
+        assertTrue(incident.getCause().contains("Connection error: Connection refused: connect"));
     }
 }

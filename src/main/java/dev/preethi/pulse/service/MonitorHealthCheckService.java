@@ -1,9 +1,11 @@
 package dev.preethi.pulse.service;
 
 import dev.preethi.pulse.entity.CheckResult;
+import dev.preethi.pulse.entity.Incident;
 import dev.preethi.pulse.entity.Monitor;
 import dev.preethi.pulse.exception.SsrfProtectionException;
 import dev.preethi.pulse.repository.CheckResultRepository;
+import dev.preethi.pulse.repository.IncidentRepository;
 import dev.preethi.pulse.repository.MonitorRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -18,6 +20,7 @@ import java.net.http.HttpResponse;
 import java.net.http.HttpTimeoutException;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Optional;
 
 @Service
 public class MonitorHealthCheckService {
@@ -26,17 +29,20 @@ public class MonitorHealthCheckService {
 
     private final MonitorRepository monitorRepository;
     private final CheckResultRepository checkResultRepository;
+    private final IncidentRepository incidentRepository;
     private final SsrfProtectionService ssrfProtectionService;
     private final HttpClient httpClient;
 
     public MonitorHealthCheckService(
             MonitorRepository monitorRepository,
             CheckResultRepository checkResultRepository,
+            IncidentRepository incidentRepository,
             SsrfProtectionService ssrfProtectionService,
             HttpClient httpClient
     ) {
         this.monitorRepository = monitorRepository;
         this.checkResultRepository = checkResultRepository;
+        this.incidentRepository = incidentRepository;
         this.ssrfProtectionService = ssrfProtectionService;
         this.httpClient = httpClient;
     }
@@ -134,6 +140,30 @@ public class MonitorHealthCheckService {
         CheckResult result = new CheckResult(monitor, statusCode, responseTimeMs, isSuccess, errorMessage);
         result = checkResultRepository.save(result);
 
+        handleIncidentLifecycle(monitor, isSuccess, errorMessage, checkTime);
+
         return result;
+    }
+
+    private void handleIncidentLifecycle(Monitor monitor, boolean isSuccess, String failureCause, Instant checkTime) {
+        if (monitor.getId() == null) {
+            return;
+        }
+
+        if (isSuccess) {
+            incidentRepository.findActiveIncidentByMonitorId(monitor.getId()).ifPresent(activeIncident -> {
+                activeIncident.resolve(checkTime);
+                incidentRepository.save(activeIncident);
+                log.info("Resolved active incident {} for monitor ID {}", activeIncident.getId(), monitor.getId());
+            });
+        } else {
+            Optional<Incident> activeIncidentOpt = incidentRepository.findActiveIncidentByMonitorId(monitor.getId());
+            if (activeIncidentOpt.isEmpty()) {
+                String cause = (failureCause != null && !failureCause.isBlank()) ? failureCause : "Health check failed";
+                Incident incident = new Incident(monitor, Incident.STATUS_ONGOING, cause, checkTime);
+                incidentRepository.save(incident);
+                log.info("Created new incident for monitor ID {} due to: {}", monitor.getId(), cause);
+            }
+        }
     }
 }
