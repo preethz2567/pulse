@@ -33,3 +33,8 @@ build/
 
 ### Environment / Secrets ###
 .env
+.env.local
+.env.*.local
+
+### Docker / Compose Overrides ###
+docker-compose*.override.yml

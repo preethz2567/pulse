@@ -4,21 +4,73 @@ services:
     container_name: pulse-postgres
     restart: unless-stopped
     environment:
-      POSTGRES_DB: pulse
-      POSTGRES_USER: pulse
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-pulse}
+      POSTGRES_USER: ${POSTGRES_USER:-pulse}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pulse}
     ports:
-      - "5432:5432"
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-5433}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-pulse} -d ${POSTGRES_DB:-pulse}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - pulse-network
 
   mailpit:
     image: axllent/mailpit:latest
     container_name: pulse-mailpit
     restart: unless-stopped
     ports:
-      - "1025:1025"
-      - "8025:8025"
+      - "127.0.0.1:${MAILPIT_WEB_PORT:-8025}:8025"
+    expose:
+      - "1025"
+    healthcheck:
+      test: ["CMD", "/mailpit", "readyz"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - pulse-network
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: pulse-backend
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${BACKEND_PORT:-8080}:8080"
+    environment:
+      SPRING_PROFILES_ACTIVE: dev
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-pulse}
+      POSTGRES_USER: ${POSTGRES_USER:-pulse}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pulse}
+      MAIL_HOST: mailpit
+      MAIL_PORT: 1025
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET environment variable is required}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:5173}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mailpit:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/actuator/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - pulse-network
+
+networks:
+  pulse-network:
+    driver: bridge
 
 volumes:
   postgres_data:
