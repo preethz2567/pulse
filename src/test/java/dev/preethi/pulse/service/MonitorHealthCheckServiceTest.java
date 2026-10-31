@@ -8,6 +8,9 @@ import dev.preethi.pulse.exception.SsrfProtectionException;
 import dev.preethi.pulse.repository.CheckResultRepository;
 import dev.preethi.pulse.repository.IncidentRepository;
 import dev.preethi.pulse.repository.MonitorRepository;
+import org.apache.hc.client5.http.impl.classic.CloseableHttpClient;
+import org.apache.hc.client5.http.protocol.HttpClientContext;
+import org.apache.hc.core5.http.ClassicHttpRequest;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -17,10 +20,8 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.io.IOException;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
-import java.net.http.HttpTimeoutException;
+import java.net.SocketTimeoutException;
+import java.net.UnknownHostException;
 import java.time.Instant;
 import java.util.Optional;
 
@@ -31,9 +32,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doNothing;
-import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
-import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -57,7 +56,7 @@ class MonitorHealthCheckServiceTest {
     private SsrfProtectionService ssrfProtectionService;
 
     @Mock
-    private HttpClient httpClient;
+    private CloseableHttpClient httpClient;
 
     @InjectMocks
     private MonitorHealthCheckService healthCheckService;
@@ -83,12 +82,7 @@ class MonitorHealthCheckServiceTest {
     @Test
     void performCheck_expectedSuccessfulResponse_updatesStatusToUpAndRecordsSuccess() throws Exception {
         doNothing().when(ssrfProtectionService).validateUrl("https://api.example.com/health");
-
-        @SuppressWarnings("unchecked")
-        HttpResponse<Void> mockResponse = mock(HttpResponse.class);
-        when(mockResponse.statusCode()).thenReturn(200);
-        doReturn(mockResponse).when(httpClient).send(any(HttpRequest.class), any());
-
+        when(httpClient.execute(any(ClassicHttpRequest.class), any(HttpClientContext.class), any())).thenReturn(200);
         when(checkResultRepository.save(any(CheckResult.class))).thenAnswer(i -> i.getArgument(0));
 
         CheckResult result = healthCheckService.performCheck(monitor);
@@ -110,12 +104,7 @@ class MonitorHealthCheckServiceTest {
     @Test
     void performCheck_unexpectedHttpStatus_updatesStatusToDownAndRecordsFailure() throws Exception {
         doNothing().when(ssrfProtectionService).validateUrl("https://api.example.com/health");
-
-        @SuppressWarnings("unchecked")
-        HttpResponse<Void> mockResponse = mock(HttpResponse.class);
-        when(mockResponse.statusCode()).thenReturn(503);
-        doReturn(mockResponse).when(httpClient).send(any(HttpRequest.class), any());
-
+        when(httpClient.execute(any(ClassicHttpRequest.class), any(HttpClientContext.class), any())).thenReturn(503);
         when(checkResultRepository.save(any(CheckResult.class))).thenAnswer(i -> i.getArgument(0));
 
         CheckResult result = healthCheckService.performCheck(monitor);
@@ -136,10 +125,8 @@ class MonitorHealthCheckServiceTest {
     @Test
     void performCheck_connectionFailure_updatesStatusToDownAndRecordsFailure() throws Exception {
         doNothing().when(ssrfProtectionService).validateUrl("https://api.example.com/health");
-
-        when(httpClient.send(any(HttpRequest.class), any()))
+        when(httpClient.execute(any(ClassicHttpRequest.class), any(HttpClientContext.class), any()))
                 .thenThrow(new IOException("Connection refused by target host"));
-
         when(checkResultRepository.save(any(CheckResult.class))).thenAnswer(i -> i.getArgument(0));
 
         CheckResult result = healthCheckService.performCheck(monitor);
@@ -160,10 +147,8 @@ class MonitorHealthCheckServiceTest {
     @Test
     void performCheck_timeout_updatesStatusToDownAndRecordsFailure() throws Exception {
         doNothing().when(ssrfProtectionService).validateUrl("https://api.example.com/health");
-
-        when(httpClient.send(any(HttpRequest.class), any()))
-                .thenThrow(new HttpTimeoutException("request timed out"));
-
+        when(httpClient.execute(any(ClassicHttpRequest.class), any(HttpClientContext.class), any()))
+                .thenThrow(new SocketTimeoutException("request timed out"));
         when(checkResultRepository.save(any(CheckResult.class))).thenAnswer(i -> i.getArgument(0));
 
         CheckResult result = healthCheckService.performCheck(monitor);
@@ -185,7 +170,6 @@ class MonitorHealthCheckServiceTest {
     void performCheck_ssrfPrivateAddressRejection_updatesStatusToDownAndDoesNotMakeHttpRequest() throws Exception {
         doThrow(new SsrfProtectionException("Access to loopback address is prohibited: 127.0.0.1"))
                 .when(ssrfProtectionService).validateUrl("https://api.example.com/health");
-
         when(checkResultRepository.save(any(CheckResult.class))).thenAnswer(i -> i.getArgument(0));
 
         CheckResult result = healthCheckService.performCheck(monitor);
@@ -198,7 +182,29 @@ class MonitorHealthCheckServiceTest {
         assertEquals("DOWN", monitor.getStatus());
         assertNotNull(monitor.getLastCheckedAt());
 
-        verify(httpClient, never()).send(any(), any());
+        verify(httpClient, never()).execute(any(ClassicHttpRequest.class), any(), any());
+        verify(monitorRepository).save(monitor);
+        verify(checkResultRepository).save(any(CheckResult.class));
+        verify(incidentRepository).save(any(Incident.class));
+    }
+
+    @Test
+    void performCheck_dnsRebindingBlockedBySafeResolver_updatesStatusToDownAndRecordsSsrfFailure() throws Exception {
+        // Pre-validation passes
+        doNothing().when(ssrfProtectionService).validateUrl("https://api.example.com/health");
+        // Connection-time resolution throws SSRF protection UnknownHostException
+        when(httpClient.execute(any(ClassicHttpRequest.class), any(HttpClientContext.class), any()))
+                .thenThrow(new UnknownHostException("SSRF Protection: Access to cloud metadata address is prohibited: 169.254.169.254"));
+        when(checkResultRepository.save(any(CheckResult.class))).thenAnswer(i -> i.getArgument(0));
+
+        CheckResult result = healthCheckService.performCheck(monitor);
+
+        assertNotNull(result);
+        assertFalse(result.getIsSuccess());
+        assertNull(result.getStatusCode());
+        assertTrue(result.getErrorMessage().contains("SSRF Protection: Access to cloud metadata address is prohibited: 169.254.169.254"));
+        assertEquals("DOWN", monitor.getStatus());
+
         verify(monitorRepository).save(monitor);
         verify(checkResultRepository).save(any(CheckResult.class));
         verify(incidentRepository).save(any(Incident.class));
@@ -208,12 +214,7 @@ class MonitorHealthCheckServiceTest {
     void performCheck_updatesLastCheckedAtTimestamp() throws Exception {
         Instant before = Instant.now().minusSeconds(1);
         doNothing().when(ssrfProtectionService).validateUrl(any());
-
-        @SuppressWarnings("unchecked")
-        HttpResponse<Void> mockResponse = mock(HttpResponse.class);
-        when(mockResponse.statusCode()).thenReturn(200);
-        doReturn(mockResponse).when(httpClient).send(any(HttpRequest.class), any());
-
+        when(httpClient.execute(any(ClassicHttpRequest.class), any(HttpClientContext.class), any())).thenReturn(200);
         when(checkResultRepository.save(any())).thenAnswer(i -> i.getArgument(0));
 
         healthCheckService.performCheck(monitor);
@@ -235,7 +236,7 @@ class MonitorHealthCheckServiceTest {
         CheckResult result = healthCheckService.checkMonitor(10L);
 
         assertNull(result);
-        verify(httpClient, never()).send(any(), any());
+        verify(httpClient, never()).execute(any(ClassicHttpRequest.class), any(), any());
         verify(ssrfProtectionService, never()).validateUrl(any());
         verify(checkResultRepository, never()).save(any());
         verify(incidentRepository, never()).save(any());
@@ -244,12 +245,7 @@ class MonitorHealthCheckServiceTest {
     @Test
     void performCheck_downWithNoActiveIncident_createsOneOngoingIncident() throws Exception {
         doNothing().when(ssrfProtectionService).validateUrl(monitor.getUrl());
-
-        @SuppressWarnings("unchecked")
-        HttpResponse<Void> mockResponse = mock(HttpResponse.class);
-        when(mockResponse.statusCode()).thenReturn(500);
-        doReturn(mockResponse).when(httpClient).send(any(HttpRequest.class), any());
-
+        when(httpClient.execute(any(ClassicHttpRequest.class), any(HttpClientContext.class), any())).thenReturn(500);
         when(checkResultRepository.save(any())).thenAnswer(i -> i.getArgument(0));
         when(incidentRepository.findActiveIncidentByMonitorId(10L)).thenReturn(Optional.empty());
 
@@ -275,12 +271,7 @@ class MonitorHealthCheckServiceTest {
     @Test
     void performCheck_downWithExistingActiveIncident_doesNotCreateAnotherIncident() throws Exception {
         doNothing().when(ssrfProtectionService).validateUrl(monitor.getUrl());
-
-        @SuppressWarnings("unchecked")
-        HttpResponse<Void> mockResponse = mock(HttpResponse.class);
-        when(mockResponse.statusCode()).thenReturn(500);
-        doReturn(mockResponse).when(httpClient).send(any(HttpRequest.class), any());
-
+        when(httpClient.execute(any(ClassicHttpRequest.class), any(HttpClientContext.class), any())).thenReturn(500);
         when(checkResultRepository.save(any())).thenAnswer(i -> i.getArgument(0));
 
         Incident existingIncident = new Incident(monitor, Incident.STATUS_ONGOING, "Previous 500 error", Instant.now().minusSeconds(120));
@@ -292,7 +283,6 @@ class MonitorHealthCheckServiceTest {
         assertFalse(result.getIsSuccess());
         assertEquals("DOWN", monitor.getStatus());
 
-        // Should NOT create or save any incident, and should NOT send email
         verify(incidentRepository, never()).save(any(Incident.class));
         verify(emailAlertService, never()).sendIncidentOpenedAlert(any());
     }
@@ -300,12 +290,7 @@ class MonitorHealthCheckServiceTest {
     @Test
     void performCheck_upWithActiveOngoingIncident_resolvesIt() throws Exception {
         doNothing().when(ssrfProtectionService).validateUrl(monitor.getUrl());
-
-        @SuppressWarnings("unchecked")
-        HttpResponse<Void> mockResponse = mock(HttpResponse.class);
-        when(mockResponse.statusCode()).thenReturn(200);
-        doReturn(mockResponse).when(httpClient).send(any(HttpRequest.class), any());
-
+        when(httpClient.execute(any(ClassicHttpRequest.class), any(HttpClientContext.class), any())).thenReturn(200);
         when(checkResultRepository.save(any())).thenAnswer(i -> i.getArgument(0));
 
         Instant incidentStartTime = Instant.now().minusSeconds(300);
@@ -329,12 +314,7 @@ class MonitorHealthCheckServiceTest {
     @Test
     void performCheck_upWithActiveAcknowledgedIncident_resolvesIt() throws Exception {
         doNothing().when(ssrfProtectionService).validateUrl(monitor.getUrl());
-
-        @SuppressWarnings("unchecked")
-        HttpResponse<Void> mockResponse = mock(HttpResponse.class);
-        when(mockResponse.statusCode()).thenReturn(200);
-        doReturn(mockResponse).when(httpClient).send(any(HttpRequest.class), any());
-
+        when(httpClient.execute(any(ClassicHttpRequest.class), any(HttpClientContext.class), any())).thenReturn(200);
         when(checkResultRepository.save(any())).thenAnswer(i -> i.getArgument(0));
 
         Instant incidentStartTime = Instant.now().minusSeconds(600);
@@ -359,12 +339,7 @@ class MonitorHealthCheckServiceTest {
     @Test
     void performCheck_upWithNoActiveIncident_doesNotCreateOrSaveIncident() throws Exception {
         doNothing().when(ssrfProtectionService).validateUrl(monitor.getUrl());
-
-        @SuppressWarnings("unchecked")
-        HttpResponse<Void> mockResponse = mock(HttpResponse.class);
-        when(mockResponse.statusCode()).thenReturn(200);
-        doReturn(mockResponse).when(httpClient).send(any(HttpRequest.class), any());
-
+        when(httpClient.execute(any(ClassicHttpRequest.class), any(HttpClientContext.class), any())).thenReturn(200);
         when(checkResultRepository.save(any())).thenAnswer(i -> i.getArgument(0));
         when(incidentRepository.findActiveIncidentByMonitorId(10L)).thenReturn(Optional.empty());
 
@@ -382,7 +357,6 @@ class MonitorHealthCheckServiceTest {
     void performCheck_ssrfFailure_createsDownResultAndIncidentWithCause() throws Exception {
         doThrow(new SsrfProtectionException("Access to loopback address is prohibited: 127.0.0.1"))
                 .when(ssrfProtectionService).validateUrl(monitor.getUrl());
-
         when(checkResultRepository.save(any())).thenAnswer(i -> i.getArgument(0));
         when(incidentRepository.findActiveIncidentByMonitorId(10L)).thenReturn(Optional.empty());
 
@@ -404,10 +378,8 @@ class MonitorHealthCheckServiceTest {
     @Test
     void performCheck_timeoutFailure_createsDownResultAndIncidentWithCause() throws Exception {
         doNothing().when(ssrfProtectionService).validateUrl(monitor.getUrl());
-
-        when(httpClient.send(any(HttpRequest.class), any()))
-                .thenThrow(new HttpTimeoutException("Connection timed out after 10000ms"));
-
+        when(httpClient.execute(any(ClassicHttpRequest.class), any(HttpClientContext.class), any()))
+                .thenThrow(new SocketTimeoutException("Connection timed out after 10000ms"));
         when(checkResultRepository.save(any())).thenAnswer(i -> i.getArgument(0));
         when(incidentRepository.findActiveIncidentByMonitorId(10L)).thenReturn(Optional.empty());
 
@@ -429,10 +401,8 @@ class MonitorHealthCheckServiceTest {
     @Test
     void performCheck_connectionFailure_createsDownResultAndIncidentWithCause() throws Exception {
         doNothing().when(ssrfProtectionService).validateUrl(monitor.getUrl());
-
-        when(httpClient.send(any(HttpRequest.class), any()))
+        when(httpClient.execute(any(ClassicHttpRequest.class), any(HttpClientContext.class), any()))
                 .thenThrow(new IOException("Connection refused: connect"));
-
         when(checkResultRepository.save(any())).thenAnswer(i -> i.getArgument(0));
         when(incidentRepository.findActiveIncidentByMonitorId(10L)).thenReturn(Optional.empty());
 
@@ -454,12 +424,7 @@ class MonitorHealthCheckServiceTest {
     @Test
     void performCheck_whenEmailAlertServiceThrowsException_checkResultAndIncidentStillPersistSuccessfully() throws Exception {
         doNothing().when(ssrfProtectionService).validateUrl(monitor.getUrl());
-
-        @SuppressWarnings("unchecked")
-        HttpResponse<Void> mockResponse = mock(HttpResponse.class);
-        when(mockResponse.statusCode()).thenReturn(503);
-        doReturn(mockResponse).when(httpClient).send(any(HttpRequest.class), any());
-
+        when(httpClient.execute(any(ClassicHttpRequest.class), any(HttpClientContext.class), any())).thenReturn(503);
         when(checkResultRepository.save(any())).thenAnswer(i -> i.getArgument(0));
         when(incidentRepository.findActiveIncidentByMonitorId(10L)).thenReturn(Optional.empty());
 
@@ -477,5 +442,45 @@ class MonitorHealthCheckServiceTest {
         verify(checkResultRepository).save(any(CheckResult.class));
         verify(incidentRepository).save(any(Incident.class));
         verify(emailAlertService).sendIncidentOpenedAlert(any());
+    }
+
+    @Test
+    void performCheck_whenTargetReturns302Redirect_treatedAsFailureWhenExpectedIs200() throws Exception {
+        doNothing().when(ssrfProtectionService).validateUrl(monitor.getUrl());
+        when(httpClient.execute(any(ClassicHttpRequest.class), any(HttpClientContext.class), any())).thenReturn(302);
+        when(checkResultRepository.save(any())).thenAnswer(i -> i.getArgument(0));
+        when(incidentRepository.findActiveIncidentByMonitorId(10L)).thenReturn(Optional.empty());
+
+        CheckResult result = healthCheckService.performCheck(monitor);
+
+        assertNotNull(result);
+        assertFalse(result.getIsSuccess());
+        assertEquals(302, result.getStatusCode());
+        assertEquals("DOWN", monitor.getStatus());
+        assertTrue(result.getErrorMessage().contains("Expected status 200 but received 302"));
+
+        verify(monitorRepository).save(monitor);
+        verify(checkResultRepository).save(any(CheckResult.class));
+        verify(incidentRepository).save(any(Incident.class));
+    }
+
+    @Test
+    void performCheck_whenTargetReturns301AndExpectedIs301_treatedAsSuccess() throws Exception {
+        monitor.setExpectedStatusCode(301);
+        doNothing().when(ssrfProtectionService).validateUrl(monitor.getUrl());
+        when(httpClient.execute(any(ClassicHttpRequest.class), any(HttpClientContext.class), any())).thenReturn(301);
+        when(checkResultRepository.save(any())).thenAnswer(i -> i.getArgument(0));
+
+        CheckResult result = healthCheckService.performCheck(monitor);
+
+        assertNotNull(result);
+        assertTrue(result.getIsSuccess());
+        assertEquals(301, result.getStatusCode());
+        assertEquals("UP", monitor.getStatus());
+        assertNull(result.getErrorMessage());
+
+        verify(monitorRepository).save(monitor);
+        verify(checkResultRepository).save(any(CheckResult.class));
+        verify(incidentRepository, never()).save(any());
     }
 }

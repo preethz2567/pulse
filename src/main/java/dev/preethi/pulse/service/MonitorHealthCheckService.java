@@ -7,18 +7,20 @@ import dev.preethi.pulse.exception.SsrfProtectionException;
 import dev.preethi.pulse.repository.CheckResultRepository;
 import dev.preethi.pulse.repository.IncidentRepository;
 import dev.preethi.pulse.repository.MonitorRepository;
+import org.apache.hc.client5.http.config.RequestConfig;
+import org.apache.hc.client5.http.impl.classic.CloseableHttpClient;
+import org.apache.hc.client5.http.protocol.HttpClientContext;
+import org.apache.hc.core5.http.ClassicHttpRequest;
+import org.apache.hc.core5.http.io.entity.EntityUtils;
+import org.apache.hc.core5.http.io.support.ClassicRequestBuilder;
+import org.apache.hc.core5.util.Timeout;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.io.IOException;
-import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
-import java.net.http.HttpTimeoutException;
-import java.time.Duration;
+import java.net.SocketTimeoutException;
 import java.time.Instant;
 import java.util.Optional;
 
@@ -32,7 +34,7 @@ public class MonitorHealthCheckService {
     private final IncidentRepository incidentRepository;
     private final EmailAlertService emailAlertService;
     private final SsrfProtectionService ssrfProtectionService;
-    private final HttpClient httpClient;
+    private final CloseableHttpClient httpClient;
 
     public MonitorHealthCheckService(
             MonitorRepository monitorRepository,
@@ -40,7 +42,7 @@ public class MonitorHealthCheckService {
             IncidentRepository incidentRepository,
             EmailAlertService emailAlertService,
             SsrfProtectionService ssrfProtectionService,
-            HttpClient httpClient
+            CloseableHttpClient httpClient
     ) {
         this.monitorRepository = monitorRepository;
         this.checkResultRepository = checkResultRepository;
@@ -70,32 +72,33 @@ public class MonitorHealthCheckService {
         String errorMessage = null;
 
         try {
-            // 1. SSRF validation
+            // 1. Pre-execution SSRF URL validation
             ssrfProtectionService.validateUrl(monitor.getUrl());
 
-            // 2. Build HTTP request
+            // 2. Build HTTP request with configured timeout
             int timeoutSec = (monitor.getTimeoutSeconds() != null) ? monitor.getTimeoutSeconds() : 30;
-            HttpRequest.Builder requestBuilder = HttpRequest.newBuilder()
-                    .uri(URI.create(monitor.getUrl()))
-                    .timeout(Duration.ofSeconds(timeoutSec))
-                    .header("User-Agent", "Pulse-Monitor/1.0");
+            RequestConfig requestConfig = RequestConfig.custom()
+                    .setResponseTimeout(Timeout.ofSeconds(timeoutSec))
+                    .setConnectionRequestTimeout(Timeout.ofSeconds(timeoutSec))
+                    .build();
+
+            HttpClientContext context = HttpClientContext.create();
+            context.setRequestConfig(requestConfig);
 
             String method = (monitor.getHttpMethod() != null) ? monitor.getHttpMethod().toUpperCase() : "GET";
-            switch (method) {
-                case "GET" -> requestBuilder.GET();
-                case "HEAD" -> requestBuilder.method("HEAD", HttpRequest.BodyPublishers.noBody());
-                case "POST" -> requestBuilder.POST(HttpRequest.BodyPublishers.noBody());
-                case "PUT" -> requestBuilder.PUT(HttpRequest.BodyPublishers.noBody());
-                case "DELETE" -> requestBuilder.DELETE();
-                default -> requestBuilder.method(method, HttpRequest.BodyPublishers.noBody());
-            }
+            ClassicRequestBuilder requestBuilder = ClassicRequestBuilder.create(method)
+                    .setUri(monitor.getUrl())
+                    .setHeader("User-Agent", "Pulse-Monitor/1.0");
 
-            HttpRequest request = requestBuilder.build();
+            ClassicHttpRequest request = requestBuilder.build();
 
-            // 3. Send request
-            HttpResponse<Void> response = httpClient.send(request, HttpResponse.BodyHandlers.discarding());
+            // 3. Execute request via Apache HC5 (DnsResolver enforces SSRF safety at connection time)
+            statusCode = httpClient.execute(request, context, response -> {
+                EntityUtils.consumeQuietly(response.getEntity());
+                return response.getCode();
+            });
+
             responseTimeMs = (int) (System.currentTimeMillis() - startTime);
-            statusCode = response.statusCode();
 
             int expectedStatus = (monitor.getExpectedStatusCode() != null) ? monitor.getExpectedStatusCode() : 200;
             if (statusCode == expectedStatus) {
@@ -113,21 +116,25 @@ public class MonitorHealthCheckService {
             errorMessage = "SSRF Protection: " + e.getMessage();
             monitor.setStatus("DOWN");
             log.warn("Monitor ID {} blocked by SSRF protection: {}", monitor.getId(), e.getMessage());
-        } catch (HttpTimeoutException e) {
+        } catch (SocketTimeoutException e) {
             responseTimeMs = (int) (System.currentTimeMillis() - startTime);
             isSuccess = false;
-            errorMessage = "Request timed out: " + e.getMessage();
+            errorMessage = "Request timed out: " + (e.getMessage() != null ? e.getMessage() : "Timeout");
             monitor.setStatus("DOWN");
         } catch (IOException e) {
             responseTimeMs = (int) (System.currentTimeMillis() - startTime);
             isSuccess = false;
-            errorMessage = "Connection error: " + (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName());
-            monitor.setStatus("DOWN");
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            responseTimeMs = (int) (System.currentTimeMillis() - startTime);
-            isSuccess = false;
-            errorMessage = "Check interrupted";
+            Throwable cause = e.getCause();
+            if ((e.getMessage() != null && e.getMessage().contains("SSRF Protection")) ||
+                (cause != null && cause.getMessage() != null && cause.getMessage().contains("SSRF Protection"))) {
+                String msg = (cause != null && cause.getMessage() != null && cause.getMessage().contains("SSRF Protection"))
+                        ? cause.getMessage()
+                        : e.getMessage();
+                errorMessage = msg.startsWith("SSRF Protection") ? msg : "SSRF Protection: " + msg;
+                log.warn("Monitor ID {} blocked by SSRF-safe DNS resolver: {}", monitor.getId(), msg);
+            } else {
+                errorMessage = "Connection error: " + (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName());
+            }
             monitor.setStatus("DOWN");
         } catch (Exception e) {
             responseTimeMs = (int) (System.currentTimeMillis() - startTime);
