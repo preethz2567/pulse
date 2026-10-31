@@ -42,6 +42,20 @@ public class GlobalExceptionHandler {
         return ResponseEntity.status(HttpStatus.CONFLICT).body(errorResponse);
     }
 
+    @ExceptionHandler(DuplicateSlugException.class)
+    public ResponseEntity<ErrorResponse> handleDuplicateSlug(
+            DuplicateSlugException ex,
+            HttpServletRequest request
+    ) {
+        ErrorResponse errorResponse = new ErrorResponse(
+                HttpStatus.CONFLICT.value(),
+                HttpStatus.CONFLICT.getReasonPhrase(),
+                ex.getMessage(),
+                request.getRequestURI()
+        );
+        return ResponseEntity.status(HttpStatus.CONFLICT).body(errorResponse);
+    }
+
     @ExceptionHandler(UserNotFoundException.class)
     public ResponseEntity<ErrorResponse> handleUserNotFound(
             UserNotFoundException ex,
@@ -87,6 +101,20 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(IncidentNotFoundException.class)
     public ResponseEntity<ErrorResponse> handleIncidentNotFound(
             IncidentNotFoundException ex,
+            HttpServletRequest request
+    ) {
+        ErrorResponse errorResponse = new ErrorResponse(
+                HttpStatus.NOT_FOUND.value(),
+                HttpStatus.NOT_FOUND.getReasonPhrase(),
+                ex.getMessage(),
+                request.getRequestURI()
+        );
+        return ResponseEntity.status(HttpStatus.NOT_FOUND).body(errorResponse);
+    }
+
+    @ExceptionHandler(StatusPageNotFoundException.class)
+    public ResponseEntity<ErrorResponse> handleStatusPageNotFound(
+            StatusPageNotFoundException ex,
             HttpServletRequest request
     ) {
         ErrorResponse errorResponse = new ErrorResponse(
