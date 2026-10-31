@@ -99,4 +99,36 @@ class SecurityConfigTest {
                         .content("{}"))
                 .andExpect(status().isBadRequest());
     }
+
+    @Test
+    void actuatorHealthAndInfo_permittedWithoutAuthentication() throws Exception {
+        // PermitAll in SecurityConfig allows requests to pass the security filter chain to DispatcherServlet
+        mockMvc.perform(get("/actuator/health"))
+                .andExpect(status().isInternalServerError())
+                .andExpect(jsonPath("$.message").value("No static resource actuator/health."));
+
+        mockMvc.perform(get("/actuator/info"))
+                .andExpect(status().isInternalServerError())
+                .andExpect(jsonPath("$.message").value("No static resource actuator/info."));
+    }
+
+    @Test
+    void sensitiveActuatorEndpoints_requireAuthentication() throws Exception {
+        mockMvc.perform(get("/actuator/env"))
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.status").value(401))
+                .andExpect(jsonPath("$.error").value("Unauthorized"))
+                .andExpect(jsonPath("$.message").value("Full authentication is required to access this resource"))
+                .andExpect(jsonPath("$.path").value("/actuator/env"));
+
+        mockMvc.perform(get("/actuator/beans"))
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.status").value(401))
+                .andExpect(jsonPath("$.path").value("/actuator/beans"));
+
+        mockMvc.perform(get("/actuator/configprops"))
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.status").value(401))
+                .andExpect(jsonPath("$.path").value("/actuator/configprops"));
+    }
 }
