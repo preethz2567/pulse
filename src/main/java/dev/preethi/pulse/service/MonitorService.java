@@ -1,26 +1,54 @@
 package dev.preethi.pulse.service;
 
+import dev.preethi.pulse.dto.CheckResultResponse;
 import dev.preethi.pulse.dto.CreateMonitorRequest;
 import dev.preethi.pulse.dto.MonitorResponse;
 import dev.preethi.pulse.dto.UpdateMonitorRequest;
+import dev.preethi.pulse.dto.UptimeResponse;
+import dev.preethi.pulse.dto.UptimeStatsProjection;
 import dev.preethi.pulse.entity.Monitor;
 import dev.preethi.pulse.entity.User;
 import dev.preethi.pulse.exception.MonitorNotFoundException;
+import dev.preethi.pulse.repository.CheckResultRepository;
 import dev.preethi.pulse.repository.MonitorRepository;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
 
 @Service
 public class MonitorService {
 
     private final MonitorRepository monitorRepository;
+    private final CheckResultRepository checkResultRepository;
     private final UserService userService;
+    private final Clock clock;
 
-    public MonitorService(MonitorRepository monitorRepository, UserService userService) {
+    @Autowired
+    public MonitorService(
+            MonitorRepository monitorRepository,
+            CheckResultRepository checkResultRepository,
+            UserService userService
+    ) {
+        this(monitorRepository, checkResultRepository, userService, Clock.systemUTC());
+    }
+
+    public MonitorService(
+            MonitorRepository monitorRepository,
+            CheckResultRepository checkResultRepository,
+            UserService userService,
+            Clock clock
+    ) {
         this.monitorRepository = monitorRepository;
+        this.checkResultRepository = checkResultRepository;
         this.userService = userService;
+        this.clock = clock != null ? clock : Clock.systemUTC();
     }
 
     @Transactional
@@ -89,5 +117,65 @@ public class MonitorService {
         Monitor monitor = monitorRepository.findByIdAndUserId(id, user.getId())
                 .orElseThrow(() -> new MonitorNotFoundException("Monitor not found with id: " + id));
         monitorRepository.delete(monitor);
+    }
+
+    @Transactional(readOnly = true)
+    public List<CheckResultResponse> getMonitorResults(Long id, String userEmail, int limit) {
+        if (limit < 1 || limit > 500) {
+            throw new IllegalArgumentException("Limit must be between 1 and 500");
+        }
+
+        User user = userService.getUserByEmail(userEmail);
+        Monitor monitor = monitorRepository.findByIdAndUserId(id, user.getId())
+                .orElseThrow(() -> new MonitorNotFoundException("Monitor not found with id: " + id));
+
+        PageRequest pageRequest = PageRequest.of(0, limit, Sort.by(Sort.Direction.DESC, "checkedAt"));
+        return checkResultRepository.findByMonitorId(monitor.getId(), pageRequest)
+                .stream()
+                .map(CheckResultResponse::from)
+                .toList();
+    }
+
+    @Transactional(readOnly = true)
+    public UptimeResponse getMonitorUptime(Long id, String userEmail, String range) {
+        if (range == null || range.isBlank()) {
+            throw new IllegalArgumentException("Range must not be null or blank");
+        }
+
+        Duration duration = switch (range) {
+            case "24h" -> Duration.ofHours(24);
+            case "7d" -> Duration.ofDays(7);
+            case "30d" -> Duration.ofDays(30);
+            default -> throw new IllegalArgumentException("Unsupported range: " + range + ". Supported ranges are: 24h, 7d, 30d");
+        };
+
+        User user = userService.getUserByEmail(userEmail);
+        Monitor monitor = monitorRepository.findByIdAndUserId(id, user.getId())
+                .orElseThrow(() -> new MonitorNotFoundException("Monitor not found with id: " + id));
+
+        Instant now = Instant.now(clock);
+        Instant since = now.minus(duration);
+
+        UptimeStatsProjection stats = checkResultRepository.findUptimeStats(monitor.getId(), since, now);
+
+        long totalChecks = stats != null ? stats.getTotalChecks() : 0L;
+        long successfulChecks = stats != null ? stats.getSuccessfulChecks() : 0L;
+        long failedChecks = totalChecks - successfulChecks;
+
+        double uptimePercentage = 0.0;
+        if (totalChecks > 0) {
+            uptimePercentage = (successfulChecks * 100.0) / totalChecks;
+        }
+
+        return new UptimeResponse(
+                monitor.getId(),
+                range,
+                uptimePercentage,
+                totalChecks,
+                successfulChecks,
+                failedChecks,
+                since,
+                now
+        );
     }
 }

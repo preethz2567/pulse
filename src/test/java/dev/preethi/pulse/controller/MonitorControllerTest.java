@@ -4,9 +4,11 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.preethi.pulse.config.JwtAuthenticationEntryPoint;
 import dev.preethi.pulse.config.JwtAuthenticationFilter;
 import dev.preethi.pulse.config.SecurityConfig;
+import dev.preethi.pulse.dto.CheckResultResponse;
 import dev.preethi.pulse.dto.CreateMonitorRequest;
 import dev.preethi.pulse.dto.MonitorResponse;
 import dev.preethi.pulse.dto.UpdateMonitorRequest;
+import dev.preethi.pulse.dto.UptimeResponse;
 import dev.preethi.pulse.exception.GlobalExceptionHandler;
 import dev.preethi.pulse.exception.MonitorNotFoundException;
 import dev.preethi.pulse.service.JwtService;
@@ -395,6 +397,222 @@ class MonitorControllerTest {
     @Test
     void deleteMonitor_whenUnauthenticated_returns401() throws Exception {
         mockMvc.perform(delete("/api/monitors/1"))
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.status").value(401));
+
+        verifyNoInteractions(monitorService);
+    }
+
+    @Test
+    void getMonitorResults_whenOwned_returns200WithDefaultLimit50() throws Exception {
+        CheckResultResponse res1 = new CheckResultResponse(1L, 10L, 200, 120, true, null, Instant.parse("2026-10-31T12:00:00Z"));
+        CheckResultResponse res2 = new CheckResultResponse(2L, 10L, 500, 310, false, "Gateway Timeout", Instant.parse("2026-10-31T11:59:00Z"));
+
+        when(monitorService.getMonitorResults(10L, "alice@example.com", 50))
+                .thenReturn(List.of(res1, res2));
+
+        mockMvc.perform(get("/api/monitors/10/results")
+                        .header("Authorization", "Bearer " + VALID_TOKEN))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()").value(2))
+                .andExpect(jsonPath("$[0].id").value(1))
+                .andExpect(jsonPath("$[0].monitorId").value(10))
+                .andExpect(jsonPath("$[0].statusCode").value(200))
+                .andExpect(jsonPath("$[0].responseTimeMs").value(120))
+                .andExpect(jsonPath("$[0].isSuccess").value(true))
+                .andExpect(jsonPath("$[0].errorMessage").doesNotExist())
+                .andExpect(jsonPath("$[0].checkedAt").value("2026-10-31T12:00:00Z"))
+                .andExpect(jsonPath("$[1].id").value(2))
+                .andExpect(jsonPath("$[1].statusCode").value(500))
+                .andExpect(jsonPath("$[1].isSuccess").value(false))
+                .andExpect(jsonPath("$[1].errorMessage").value("Gateway Timeout"));
+
+        verify(monitorService).getMonitorResults(10L, "alice@example.com", 50);
+    }
+
+    @Test
+    void getMonitorResults_withCustomLimit_passesLimitToService() throws Exception {
+        when(monitorService.getMonitorResults(10L, "alice@example.com", 1))
+                .thenReturn(List.of());
+
+        mockMvc.perform(get("/api/monitors/10/results?limit=1")
+                        .header("Authorization", "Bearer " + VALID_TOKEN))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()").value(0));
+
+        verify(monitorService).getMonitorResults(10L, "alice@example.com", 1);
+    }
+
+    @Test
+    void getMonitorResults_withMaxLimit500_passesLimitToService() throws Exception {
+        when(monitorService.getMonitorResults(10L, "alice@example.com", 500))
+                .thenReturn(List.of());
+
+        mockMvc.perform(get("/api/monitors/10/results?limit=500")
+                        .header("Authorization", "Bearer " + VALID_TOKEN))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()").value(0));
+
+        verify(monitorService).getMonitorResults(10L, "alice@example.com", 500);
+    }
+
+    @Test
+    void getMonitorResults_withLimit0_returns400BadRequest() throws Exception {
+        when(monitorService.getMonitorResults(10L, "alice@example.com", 0))
+                .thenThrow(new IllegalArgumentException("Limit must be between 1 and 500"));
+
+        mockMvc.perform(get("/api/monitors/10/results?limit=0")
+                        .header("Authorization", "Bearer " + VALID_TOKEN))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.status").value(400))
+                .andExpect(jsonPath("$.error").value("Bad Request"))
+                .andExpect(jsonPath("$.message").value("Limit must be between 1 and 500"));
+    }
+
+    @Test
+    void getMonitorResults_withLimit501_returns400BadRequest() throws Exception {
+        when(monitorService.getMonitorResults(10L, "alice@example.com", 501))
+                .thenThrow(new IllegalArgumentException("Limit must be between 1 and 500"));
+
+        mockMvc.perform(get("/api/monitors/10/results?limit=501")
+                        .header("Authorization", "Bearer " + VALID_TOKEN))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.status").value(400))
+                .andExpect(jsonPath("$.error").value("Bad Request"))
+                .andExpect(jsonPath("$.message").value("Limit must be between 1 and 500"));
+    }
+
+    @Test
+    void getMonitorResults_whenNotFoundOrUnowned_returns404NotFound() throws Exception {
+        when(monitorService.getMonitorResults(999L, "alice@example.com", 50))
+                .thenThrow(new MonitorNotFoundException("Monitor not found with id: 999"));
+
+        mockMvc.perform(get("/api/monitors/999/results")
+                        .header("Authorization", "Bearer " + VALID_TOKEN))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.status").value(404))
+                .andExpect(jsonPath("$.error").value("Not Found"))
+                .andExpect(jsonPath("$.message").value("Monitor not found with id: 999"));
+
+        verify(monitorService).getMonitorResults(999L, "alice@example.com", 50);
+    }
+
+    @Test
+    void getMonitorResults_whenUnauthenticated_returns401() throws Exception {
+        mockMvc.perform(get("/api/monitors/10/results"))
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.status").value(401));
+
+        verifyNoInteractions(monitorService);
+    }
+
+    @Test
+    void getMonitorUptime_whenOwnedAndValidRange_returns200WithUptimeStats() throws Exception {
+        Instant start = Instant.parse("2026-10-30T12:00:00Z");
+        Instant end = Instant.parse("2026-10-31T12:00:00Z");
+        UptimeResponse uptimeResponse = new UptimeResponse(10L, "24h", 98.5, 200L, 197L, 3L, start, end);
+
+        when(monitorService.getMonitorUptime(10L, "alice@example.com", "24h")).thenReturn(uptimeResponse);
+
+        mockMvc.perform(get("/api/monitors/10/uptime?range=24h")
+                        .header("Authorization", "Bearer " + VALID_TOKEN))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.monitorId").value(10))
+                .andExpect(jsonPath("$.range").value("24h"))
+                .andExpect(jsonPath("$.uptimePercentage").value(98.5))
+                .andExpect(jsonPath("$.totalChecks").value(200))
+                .andExpect(jsonPath("$.successfulChecks").value(197))
+                .andExpect(jsonPath("$.failedChecks").value(3))
+                .andExpect(jsonPath("$.periodStart").value("2026-10-30T12:00:00Z"))
+                .andExpect(jsonPath("$.periodEnd").value("2026-10-31T12:00:00Z"));
+
+        verify(monitorService).getMonitorUptime(10L, "alice@example.com", "24h");
+    }
+
+    @Test
+    void getMonitorUptime_with7dRange_returns200() throws Exception {
+        Instant start = Instant.parse("2026-10-24T12:00:00Z");
+        Instant end = Instant.parse("2026-10-31T12:00:00Z");
+        UptimeResponse uptimeResponse = new UptimeResponse(10L, "7d", 100.0, 1000L, 1000L, 0L, start, end);
+
+        when(monitorService.getMonitorUptime(10L, "alice@example.com", "7d")).thenReturn(uptimeResponse);
+
+        mockMvc.perform(get("/api/monitors/10/uptime?range=7d")
+                        .header("Authorization", "Bearer " + VALID_TOKEN))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.range").value("7d"))
+                .andExpect(jsonPath("$.uptimePercentage").value(100.0))
+                .andExpect(jsonPath("$.totalChecks").value(1000))
+                .andExpect(jsonPath("$.successfulChecks").value(1000))
+                .andExpect(jsonPath("$.failedChecks").value(0));
+
+        verify(monitorService).getMonitorUptime(10L, "alice@example.com", "7d");
+    }
+
+    @Test
+    void getMonitorUptime_with30dRange_returns200() throws Exception {
+        Instant start = Instant.parse("2026-10-01T12:00:00Z");
+        Instant end = Instant.parse("2026-10-31T12:00:00Z");
+        UptimeResponse uptimeResponse = new UptimeResponse(10L, "30d", 0.0, 0L, 0L, 0L, start, end);
+
+        when(monitorService.getMonitorUptime(10L, "alice@example.com", "30d")).thenReturn(uptimeResponse);
+
+        mockMvc.perform(get("/api/monitors/10/uptime?range=30d")
+                        .header("Authorization", "Bearer " + VALID_TOKEN))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.range").value("30d"))
+                .andExpect(jsonPath("$.uptimePercentage").value(0.0))
+                .andExpect(jsonPath("$.totalChecks").value(0))
+                .andExpect(jsonPath("$.successfulChecks").value(0))
+                .andExpect(jsonPath("$.failedChecks").value(0));
+
+        verify(monitorService).getMonitorUptime(10L, "alice@example.com", "30d");
+    }
+
+    @Test
+    void getMonitorUptime_missingRange_returns400BadRequest() throws Exception {
+        when(monitorService.getMonitorUptime(10L, "alice@example.com", null))
+                .thenThrow(new IllegalArgumentException("Range must not be null or blank"));
+
+        mockMvc.perform(get("/api/monitors/10/uptime")
+                        .header("Authorization", "Bearer " + VALID_TOKEN))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.status").value(400))
+                .andExpect(jsonPath("$.error").value("Bad Request"))
+                .andExpect(jsonPath("$.message").value("Range must not be null or blank"));
+    }
+
+    @Test
+    void getMonitorUptime_unsupportedRange_returns400BadRequest() throws Exception {
+        when(monitorService.getMonitorUptime(10L, "alice@example.com", "invalidRange"))
+                .thenThrow(new IllegalArgumentException("Unsupported range: invalidRange. Supported ranges are: 24h, 7d, 30d"));
+
+        mockMvc.perform(get("/api/monitors/10/uptime?range=invalidRange")
+                        .header("Authorization", "Bearer " + VALID_TOKEN))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.status").value(400))
+                .andExpect(jsonPath("$.error").value("Bad Request"))
+                .andExpect(jsonPath("$.message").value("Unsupported range: invalidRange. Supported ranges are: 24h, 7d, 30d"));
+    }
+
+    @Test
+    void getMonitorUptime_whenNotFoundOrUnowned_returns404() throws Exception {
+        when(monitorService.getMonitorUptime(999L, "alice@example.com", "24h"))
+                .thenThrow(new MonitorNotFoundException("Monitor not found with id: 999"));
+
+        mockMvc.perform(get("/api/monitors/999/uptime?range=24h")
+                        .header("Authorization", "Bearer " + VALID_TOKEN))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.status").value(404))
+                .andExpect(jsonPath("$.error").value("Not Found"))
+                .andExpect(jsonPath("$.message").value("Monitor not found with id: 999"));
+
+        verify(monitorService).getMonitorUptime(999L, "alice@example.com", "24h");
+    }
+
+    @Test
+    void getMonitorUptime_whenUnauthenticated_returns401() throws Exception {
+        mockMvc.perform(get("/api/monitors/10/uptime?range=24h"))
                 .andExpect(status().isUnauthorized())
                 .andExpect(jsonPath("$.status").value(401));
 
