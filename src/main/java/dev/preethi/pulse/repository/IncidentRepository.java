@@ -31,4 +31,13 @@ public interface IncidentRepository extends JpaRepository<Incident, Long> {
     Optional<Incident> findByIdAndMonitorUserId(Long id, Long userId);
 
     List<Incident> findByStatusInOrderByStartedAtDesc(Collection<String> statuses);
+
+    @Query("SELECT i FROM Incident i JOIN FETCH i.monitor m " +
+           "WHERE m.id IN :monitorIds " +
+           "AND (i.status IN ('ONGOING', 'ACKNOWLEDGED') OR i.resolvedAt IS NULL OR i.resolvedAt >= :since) " +
+           "ORDER BY i.startedAt DESC")
+    List<Incident> findPublicIncidentsByMonitorIds(
+            @Param("monitorIds") Collection<Long> monitorIds,
+            @Param("since") java.time.Instant since
+    );
 }
